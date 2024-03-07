@@ -245,6 +245,8 @@ AudioRegion::init ()
 	listen_to_my_curves ();
 	connect_to_analysis_changed ();
 	connect_to_header_position_offset_changed ();
+
+	_fx_pos = _cache_start = _cache_end = -1;
 }
 
 /** Constructor for use by derived types only */
@@ -290,6 +292,9 @@ AudioRegion::AudioRegion (std::shared_ptr<const AudioRegion> other)
 	listen_to_my_curves ();
 	connect_to_analysis_changed ();
 	connect_to_header_position_offset_changed ();
+
+	// TODO copy plugins
+	_fx_pos = _cache_start = _cache_end = -1;
 
 	assert(_type == DataType::AUDIO);
 	assert (_sources.size() == _master_sources.size());
@@ -508,8 +513,9 @@ AudioRegion::read_at (Sample* buf, Sample* mixdown_buffer, float* gain_buffer,
 	*/
 
 	assert (cnt >= 0);
+	uint32_t const n_chn = n_channels ();
 
-	if (n_channels() == 0) {
+	if (n_chn == 0) {
 		return 0;
 	}
 
@@ -596,36 +602,62 @@ AudioRegion::read_at (Sample* buf, Sample* mixdown_buffer, float* gain_buffer,
 		}
 	}
 
-	/* READ DATA FROM THE SOURCE INTO mixdown_buffer.
-	   We can never read directly into buf, since it may contain data
-	   from a region `below' this one in the stack, and our fades (if they exist)
-	   may need to mix with the existing data.
-	*/
+	cout << "AR read '" << name () << "' c: "<< chan_n << " @ " << internal_offset << " to " << internal_offset + to_read << " (" << to_read << ")\n";
 
-	if (read_from_sources (_sources, lsamples, mixdown_buffer, pos, to_read, chan_n) != to_read) {
-		return 0;
-	}
+	Glib::Threads::Mutex::Lock cl (_cache_lock);
+	// TODO invalidate cache on  Playlist::notify_contents_changed
 
-	/* APPLY REGULAR GAIN CURVES AND SCALING TO mixdown_buffer */
+	// TODO optimize mono reader, w/o plugins -> old code
+	if (n_chn > 1 && _cache_start < _cache_end && internal_offset >= _cache_start && internal_offset + to_read <= _cache_end) {
+		printf ("USE CACHE chn %d\n", chan_n);
+		memcpy (mixdown_buffer, _readcache.get_audio (chan_n).data (internal_offset - _cache_start), to_read * sizeof (Sample));
+		cl.release ();
+	} else {
+		ChanCount cc (DataType::AUDIO, n_channels ());
+		_fx_cc = std::max (_fx_cc, cc);
+		_readcache.ensure_buffers (_fx_cc, to_read);
+		_cache_start = _cache_end = -1;
 
-	if (envelope_active())  {
-		_envelope->curve().get_vector (timepos_t (internal_offset), timepos_t (internal_offset + to_read), gain_buffer, to_read);
+		for (uint32_t chn = 0; chn < n_chn; ++chn) {
+			/* READ DATA FROM THE SOURCE INTO mixdown_buffer.
+			 * We can never read directly into buf, since it may contain data
+			 * from a region `below' this one in the stack, and our fades (if they exist)
+			 * may need to mix with the existing data.
+			 */
 
-		if (_scale_amplitude != 1.0f) {
-			for (samplecnt_t n = 0; n < to_read; ++n) {
-				mixdown_buffer[n] *= gain_buffer[n] * _scale_amplitude;
+			if (read_from_sources (_sources, lsamples, mixdown_buffer, pos, to_read, chn) != to_read) {
+				return 0; // XXX
 			}
-		} else {
-			for (samplecnt_t n = 0; n < to_read; ++n) {
-				mixdown_buffer[n] *= gain_buffer[n];
+
+			/* APPLY REGULAR GAIN CURVES AND SCALING TO mixdown_buffer */
+
+			if (envelope_active())  {
+				_envelope->curve().get_vector (timepos_t (internal_offset), timepos_t (internal_offset + to_read), gain_buffer, to_read);
+
+				if (_scale_amplitude != 1.0f) {
+					for (samplecnt_t n = 0; n < to_read; ++n) {
+						mixdown_buffer[n] *= gain_buffer[n] * _scale_amplitude;
+					}
+				} else {
+					for (samplecnt_t n = 0; n < to_read; ++n) {
+						mixdown_buffer[n] *= gain_buffer[n];
+					}
+				}
+			} else if (_scale_amplitude != 1.0f) {
+				apply_gain_to_buffer (mixdown_buffer, to_read, _scale_amplitude);
 			}
+
+			/* apply region FX */
+
+			_readcache.get_audio (chn).read_from (mixdown_buffer, to_read);
 		}
-	} else if (_scale_amplitude != 1.0f) {
-		apply_gain_to_buffer (mixdown_buffer, to_read, _scale_amplitude);
-	}
 
-	/* apply region FX */
-	apply_region_fx (mixdown_buffer, internal_offset, internal_offset + to_read, to_read, chan_n);
+		apply_region_fx (_readcache, internal_offset, internal_offset + to_read, to_read);
+		_cache_start = internal_offset;
+		_cache_end = internal_offset + to_read;
+		memcpy (mixdown_buffer, _readcache.get_audio (chan_n).data (internal_offset - _cache_start), to_read * sizeof (Sample));
+		cl.release ();
+	}
 
 	/* APPLY FADES TO THE DATA IN mixdown_buffer AND MIX THE RESULTS INTO
 	 * buf. The key things to realize here: (1) the fade being applied is
@@ -2123,7 +2155,7 @@ bool
 AudioRegion::add_plugin (ARDOUR::PluginType type, std::string const& name)
 {
 	PluginInfoPtr pip = LuaAPI::new_plugin_info (name, type);
-	if (!pip) { 
+	if (!pip) {
 		return false;
 	}
 	PluginPtr p = pip->load (_session);
@@ -2131,24 +2163,49 @@ AudioRegion::add_plugin (ARDOUR::PluginType type, std::string const& name)
 		return false;
 	}
 	std::shared_ptr<PluginInsert> pi (new PluginInsert (_session, _session, p));
-	ChanCount in (DataType::AUDIO, 1);
-	ChanCount out (DataType::AUDIO, 1);
+	pi->set_strict_io (true);
+
+	ChanCount in (DataType::AUDIO, n_channels ());
+	if (!_plugins.empty ()) {
+		in = _plugins.back ()->output_streams ();
+	}
+	ChanCount out (in);
+
 	if (!pi->can_support_io_configuration (in, out)) {
+		return false;
+	}
+	if (in.n_audio () > out.n_audio ()) {
 		return false;
 	}
 	if (!pi->configure_io (in, out)) {
 		return false;
 	}
+
+	{
+		Glib::Threads::Mutex::Lock cl (_cache_lock);
+		ChanCount cc (DataType::AUDIO, n_channels ());
+		_fx_cc = std::max (in, out);
+		for (auto const& pi : _plugins) {
+			_fx_cc = std::max (_fx_cc, pi->input_streams ());
+			_fx_cc = std::max (_fx_cc, pi->output_streams ());
+		}
+	}
+	cout << "DR processor chan count: " << _fx_cc << "\n";
+
 	pi->activate ();
-	_bufferset.ensure_buffers (std::max(in, out), 1048576); // see DiskReader::do_refill_with_alloc
-	_plugins.push_back (pi);
+	{
+		Glib::Threads::Mutex::Lock lx (_fx_lock);
+		_plugins.push_back (pi);
+	}
 	send_change (PropertyChange (Properties::envelope_active)); // XXX force reload
 	return true;
 }
 
 void
-AudioRegion::apply_region_fx (Sample* buf, samplepos_t start_sample, samplepos_t end_sample, samplecnt_t n_samples, uint32_t chan) const
+AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplepos_t end_sample, samplecnt_t n_samples) const
 {
+	Glib::Threads::Mutex::Lock lx (_fx_lock);
+
 	if (_plugins.empty ()) {
 		return;
 	}
@@ -2156,11 +2213,14 @@ AudioRegion::apply_region_fx (Sample* buf, samplepos_t start_sample, samplepos_t
 	ARDOUR::ProcessThread* pt = new ProcessThread ();
 	pt->get_buffers ();
 
-	_bufferset.get_audio (0).read_from (buf, n_samples);
 	for (auto const& pi : _plugins) {
-		pi->run (_bufferset, start_sample, end_sample, 1.0, n_samples, true);
+		if (_fx_pos != start_sample) {
+			printf ("FLUSH REGION FX\n");
+			pi->flush ();
+		}
+		pi->run (bufs, start_sample, end_sample, 1.0, n_samples, true);
 	}
-	memcpy (buf, _bufferset.get_audio (0).data (), n_samples * sizeof (Sample));
+	_fx_pos = end_sample;
 	pt->drop_buffers ();
 	delete pt;
 }

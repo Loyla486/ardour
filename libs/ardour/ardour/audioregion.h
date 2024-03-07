@@ -251,9 +251,16 @@ class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 
 	std::shared_ptr<ARDOUR::Region> get_single_other_xfade_region (bool start) const;
 
-	void apply_region_fx (Sample*, samplepos_t, samplepos_t, samplecnt_t, uint32_t) const;
+	void apply_region_fx (BufferSet&, samplepos_t, samplepos_t, samplecnt_t) const;
+	mutable Glib::Threads::Mutex             _fx_lock;
 	std::list<std::shared_ptr<PluginInsert>> _plugins;
-	mutable BufferSet                        _bufferset;
+	mutable samplepos_t                      _fx_pos;
+	mutable ChanCount                        _fx_cc;
+
+	mutable Glib::Threads::Mutex _cache_lock;
+	mutable BufferSet            _readcache;
+	mutable samplepos_t          _cache_start;
+	mutable samplepos_t          _cache_end;
 
   protected:
 	/* default constructor for derived (compound) types */
