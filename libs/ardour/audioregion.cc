@@ -50,7 +50,9 @@
 #include "ardour/dB.h"
 #include "ardour/debug.h"
 #include "ardour/event_type_map.h"
+#include "ardour/lua_api.h"
 #include "ardour/playlist.h"
+#include "ardour/plugin_insert.h"
 #include "ardour/audiofilesource.h"
 #include "ardour/region_factory.h"
 #include "ardour/runtime_functions.h"
@@ -621,6 +623,9 @@ AudioRegion::read_at (Sample* buf, Sample* mixdown_buffer, float* gain_buffer,
 	} else if (_scale_amplitude != 1.0f) {
 		apply_gain_to_buffer (mixdown_buffer, to_read, _scale_amplitude);
 	}
+
+	/* apply region FX */
+	apply_region_fx (mixdown_buffer, internal_offset, internal_offset + to_read, to_read, chan_n);
 
 	/* APPLY FADES TO THE DATA IN mixdown_buffer AND MIX THE RESULTS INTO
 	 * buf. The key things to realize here: (1) the fade being applied is
@@ -2112,4 +2117,50 @@ errout:
 	}
 
 	return to_read == 0;
+}
+
+bool
+AudioRegion::add_plugin (ARDOUR::PluginType type, std::string const& name)
+{
+	PluginInfoPtr pip = LuaAPI::new_plugin_info (name, type);
+	if (!pip) { 
+		return false;
+	}
+	PluginPtr p = pip->load (_session);
+	if (!p) {
+		return false;
+	}
+	std::shared_ptr<PluginInsert> pi (new PluginInsert (_session, _session, p));
+	ChanCount in (DataType::AUDIO, 1);
+	ChanCount out (DataType::AUDIO, 1);
+	if (!pi->can_support_io_configuration (in, out)) {
+		return false;
+	}
+	if (!pi->configure_io (in, out)) {
+		return false;
+	}
+	pi->activate ();
+	_bufferset.ensure_buffers (std::max(in, out), 1048576); // see DiskReader::do_refill_with_alloc
+	_plugins.push_back (pi);
+	send_change (PropertyChange (Properties::envelope_active)); // XXX force reload
+	return true;
+}
+
+void
+AudioRegion::apply_region_fx (Sample* buf, samplepos_t start_sample, samplepos_t end_sample, samplecnt_t n_samples, uint32_t chan) const
+{
+	if (_plugins.empty ()) {
+		return;
+	}
+
+	ARDOUR::ProcessThread* pt = new ProcessThread ();
+	pt->get_buffers ();
+
+	_bufferset.get_audio (0).read_from (buf, n_samples);
+	for (auto const& pi : _plugins) {
+		pi->run (_bufferset, start_sample, end_sample, 1.0, n_samples, true);
+	}
+	memcpy (buf, _bufferset.get_audio (0).data (), n_samples * sizeof (Sample));
+	pt->drop_buffers ();
+	delete pt;
 }
