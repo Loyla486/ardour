@@ -46,6 +46,7 @@
 #include "ardour/audioengine.h"
 #include "ardour/analysis_graph.h"
 #include "ardour/audioregion.h"
+#include "ardour/buffer_manager.h"
 #include "ardour/session.h"
 #include "ardour/dB.h"
 #include "ardour/debug.h"
@@ -2192,23 +2193,55 @@ AudioRegion::add_plugin (ARDOUR::PluginType type, std::string const& name)
 	}
 	cout << "DR processor chan count: " << _fx_cc << "\n";
 
+	/* subscribe to parameter changes */
+	ControllableSet acs;
+	pi->automatables (acs);
+	for (auto& ec : acs) {
+		ec->Changed.connect_same_thread (*this, [this] (bool, PBD::Controllable::GroupControlDisposition)
+				{
+					// TODO queue only once,
+					{
+						Glib::Threads::Mutex::Lock cl (_cache_lock);
+						_cache_start = _cache_end = -1;
+					}
+					send_change (PropertyChange (Properties::envelope_active));
+				});
+	}
+
+	// TODO subscribe to block-size changes
+	pi->set_block_size (_session.get_block_size ());
 	pi->activate ();
+
 	{
-		Glib::Threads::Mutex::Lock lx (_fx_lock);
+		Glib::Threads::RWLock::WriterLock lm (_fx_lock);
 		_plugins.push_back (pi);
 	}
 	send_change (PropertyChange (Properties::envelope_active)); // XXX force reload
 	return true;
 }
 
+std::shared_ptr<PluginInsert>
+AudioRegion::nth_plugin (uint32_t n) const
+{
+	Glib::Threads::RWLock::ReaderLock lm (_fx_lock);
+	for (auto const& pi : _plugins) {
+		if (n-- == 0) {
+			return pi;
+		}
+	}
+	return std::shared_ptr<PluginInsert> ();
+}
+
 void
 AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplepos_t end_sample, samplecnt_t n_samples) const
 {
-	Glib::Threads::Mutex::Lock lx (_fx_lock);
+	Glib::Threads::RWLock::ReaderLock lm (_fx_lock);
 
 	if (_plugins.empty ()) {
 		return;
 	}
+
+	//pframes_t block_size = _session.get_block_size ();
 
 	ARDOUR::ProcessThread* pt = new ProcessThread ();
 	pt->get_buffers ();
@@ -2218,7 +2251,22 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 			printf ("FLUSH REGION FX\n");
 			pi->flush ();
 		}
+#if 1
+		//BufferManager::ensure_buffers (ChanCount::ZERO, n_samples); // XXX required for get_noinplace_buffers and  get_scratch_buffers
 		pi->run (bufs, start_sample, end_sample, 1.0, n_samples, true);
+#else
+		// XXX need bufs offset.
+		// Also automation uses global session time for touch, and roll
+		// we may need sth closed to IOPlug (except with replication)
+		samplecnt_t remain = n_samples;
+		samplecnt_t offset = 0;
+			while (remain > 0) {
+				pframes_t run = std::min <pframes_t> (remain, block_size);
+				pi->run (bufs, start_sample + offset, end_sample + offset, 1.0, run, true);
+				remain -= run;
+				offset += run;
+			}
+#endif
 	}
 	_fx_pos = end_sample;
 	pt->drop_buffers ();

@@ -160,6 +160,7 @@ class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 	int separate_by_channel (std::vector<std::shared_ptr<Region> >&) const;
 
 	bool add_plugin (ARDOUR::PluginType type, std::string const& name);
+	std::shared_ptr<PluginInsert> nth_plugin (uint32_t n) const;
 
 	/* automation */
 
@@ -252,7 +253,7 @@ class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 	std::shared_ptr<ARDOUR::Region> get_single_other_xfade_region (bool start) const;
 
 	void apply_region_fx (BufferSet&, samplepos_t, samplepos_t, samplecnt_t) const;
-	mutable Glib::Threads::Mutex             _fx_lock;
+	mutable Glib::Threads::RWLock            _fx_lock;
 	std::list<std::shared_ptr<PluginInsert>> _plugins;
 	mutable samplepos_t                      _fx_pos;
 	mutable ChanCount                        _fx_cc;
