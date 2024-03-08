@@ -35,6 +35,7 @@
 #include "ardour/playlist.h"
 #include "ardour/audioregion.h"
 #include "ardour/audiosource.h"
+#include "ardour/plugin_insert.h"
 #include "ardour/profile.h"
 #include "ardour/session.h"
 
@@ -70,6 +71,7 @@
 #include "audio_time_axis.h"
 #include "rgb_macros.h"
 #include "gui_thread.h"
+#include "plugin_ui.h"
 #include "ui_config.h"
 
 #include "pbd/i18n.h"
@@ -1701,6 +1703,20 @@ AudioRegionView::show_region_editor ()
 
 	editor->present ();
 	editor->show_all();
+}
+
+void
+AudioRegionView::edit_region_fx (uint32_t n)
+{
+	std::shared_ptr<PluginInsert> pi = audio_region ()->nth_plugin (n);
+	if (!pi) {
+		return;
+	}
+	PluginUIWindow* plugin_ui = new PluginUIWindow (pi, false, true);
+	if (plugin_ui) {
+		//pi->window_proxy()->use_window (*plugin_ui)
+		plugin_ui->show_all ();
+	}
 }
 
 void
