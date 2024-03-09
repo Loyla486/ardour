@@ -603,20 +603,30 @@ AudioRegion::read_at (Sample* buf, Sample* mixdown_buffer, float* gain_buffer,
 		}
 	}
 
-	cout << "AR read '" << name () << "' c: "<< chan_n << " @ " << internal_offset << " to " << internal_offset + to_read << " (" << to_read << ")\n";
-
 	Glib::Threads::Mutex::Lock cl (_cache_lock);
-	// TODO invalidate cache on  Playlist::notify_contents_changed
+	if (chan_n == 0 && _invalidated.exchange (false)) {
+		_cache_start = _cache_end = -1;
+	}
 
 	// TODO optimize mono reader, w/o plugins -> old code
 	if (n_chn > 1 && _cache_start < _cache_end && internal_offset >= _cache_start && internal_offset + to_read <= _cache_end) {
-		printf ("USE CACHE chn %d\n", chan_n);
+		DEBUG_TRACE (DEBUG::AudioPlayback, string_compose ("Region '%1' channel: %2 copy from cache %3 - %4 to_read: %5\n",
+		             name(), chan_n, internal_offset, internal_offset + to_read, to_read));
 		memcpy (mixdown_buffer, _readcache.get_audio (chan_n).data (internal_offset - _cache_start), to_read * sizeof (Sample));
 		cl.release ();
 	} else {
+		Glib::Threads::RWLock::ReaderLock lm (_fx_lock);
+		bool have_fx = !_plugins.empty ();
+		lm.release ();
+
+		DEBUG_TRACE (DEBUG::AudioPlayback, string_compose ("Region '%1' channel: %2 read at %3 - %4 to_read: %5 with fx: %6\n",
+		             name(), chan_n, internal_offset, internal_offset + to_read, to_read, have_fx));
+
 		ChanCount cc (DataType::AUDIO, n_channels ());
 		_fx_cc = std::max (_fx_cc, cc);
 		_readcache.ensure_buffers (_fx_cc, to_read);
+
+		/* reset in case read fails we return early */
 		_cache_start = _cache_end = -1;
 
 		for (uint32_t chn = 0; chn < n_chn; ++chn) {
@@ -648,15 +658,27 @@ AudioRegion::read_at (Sample* buf, Sample* mixdown_buffer, float* gain_buffer,
 				apply_gain_to_buffer (mixdown_buffer, to_read, _scale_amplitude);
 			}
 
-			/* apply region FX */
-
-			_readcache.get_audio (chn).read_from (mixdown_buffer, to_read);
+			/* for mono regions no cache is required, unless there are
+			 * regionFX, which use the _readcache BufferSet.
+			 */
+			if (n_chn > 1 || !have_fx) {
+				_readcache.get_audio (chn).read_from (mixdown_buffer, to_read);
+			}
 		}
 
-		apply_region_fx (_readcache, internal_offset, internal_offset + to_read, to_read);
+		/* apply region FX to all channels */
+		if (have_fx) {
+			apply_region_fx (_readcache, internal_offset, internal_offset + to_read, to_read);
+		}
+
+		/* for mono regions without plugins, mixdown_buffer is valid as-is */
+		if (n_chn > 1 || !have_fx) {
+			/* copy data for current channel */
+			memcpy (mixdown_buffer, _readcache.get_audio (chan_n).data (), to_read * sizeof (Sample));
+		}
+
 		_cache_start = internal_offset;
 		_cache_end = internal_offset + to_read;
-		memcpy (mixdown_buffer, _readcache.get_audio (chan_n).data (internal_offset - _cache_start), to_read * sizeof (Sample));
 		cl.release ();
 	}
 
@@ -2199,12 +2221,9 @@ AudioRegion::add_plugin (ARDOUR::PluginType type, std::string const& name)
 	for (auto& ec : acs) {
 		ec->Changed.connect_same_thread (*this, [this] (bool, PBD::Controllable::GroupControlDisposition)
 				{
-					// TODO queue only once,
-					{
-						Glib::Threads::Mutex::Lock cl (_cache_lock);
-						_cache_start = _cache_end = -1;
+					if (!_invalidated.exchange (true)) {
+						send_change (PropertyChange (Properties::envelope_active));
 					}
-					send_change (PropertyChange (Properties::envelope_active));
 				});
 	}
 
@@ -2248,7 +2267,6 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 
 	for (auto const& pi : _plugins) {
 		if (_fx_pos != start_sample) {
-			printf ("FLUSH REGION FX\n");
 			pi->flush ();
 		}
 #if 1

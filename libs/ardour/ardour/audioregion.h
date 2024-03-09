@@ -23,6 +23,7 @@
 #ifndef __ardour_audio_region_h__
 #define __ardour_audio_region_h__
 
+#include <atomic>
 #include <vector>
 #include <list>
 
@@ -262,6 +263,7 @@ class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 	mutable BufferSet            _readcache;
 	mutable samplepos_t          _cache_start;
 	mutable samplepos_t          _cache_end;
+	mutable std::atomic<bool>    _invalidated;
 
   protected:
 	/* default constructor for derived (compound) types */
