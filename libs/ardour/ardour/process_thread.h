@@ -42,6 +42,10 @@ public:
 	void get_buffers ();
 	void drop_buffers ();
 
+	void set_custom_buffers (ThreadBuffers*);
+	void drop_custom_buffers ();
+	void free_custom_buffers ();
+
 	/* these MUST be called by a process thread's thread, nothing else */
 
 	static BufferSet& get_silent_buffers (ChanCount count = ChanCount::ZERO);

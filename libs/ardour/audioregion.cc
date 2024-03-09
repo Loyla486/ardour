@@ -58,6 +58,7 @@
 #include "ardour/region_factory.h"
 #include "ardour/runtime_functions.h"
 #include "ardour/sndfilesource.h"
+#include "ardour/thread_buffers.h"
 #include "ardour/transient_detector.h"
 #include "ardour/parameter_descriptor.h"
 
@@ -248,6 +249,7 @@ AudioRegion::init ()
 	connect_to_header_position_offset_changed ();
 
 	_fx_pos = _cache_start = _cache_end = -1;
+	_threadbuffer = NULL;
 }
 
 /** Constructor for use by derived types only */
@@ -358,6 +360,7 @@ AudioRegion::AudioRegion (SourceList& srcs)
 
 AudioRegion::~AudioRegion ()
 {
+	delete _threadbuffer;
 }
 
 void
@@ -2262,15 +2265,26 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 
 	//pframes_t block_size = _session.get_block_size ();
 
+	// XXX this processThread and ThreadBuffers should
+	// be owned by the butler.. or static?
+	// except the GUI thread may also call read_at...
 	ARDOUR::ProcessThread* pt = new ProcessThread ();
-	pt->get_buffers ();
+	if (!_threadbuffer) {
+		_threadbuffer =  new ThreadBuffers;
+	}
+	ChanCount cc (bufs.count ());
+	for (auto const& pi : _plugins) {
+		cc = max (cc, pi->required_buffers ());
+	}
+	_threadbuffer->ensure_buffers (cc, n_samples);
+	pt->set_custom_buffers (_threadbuffer);
 
 	for (auto const& pi : _plugins) {
 		if (_fx_pos != start_sample) {
 			pi->flush ();
 		}
 #if 1
-		//BufferManager::ensure_buffers (ChanCount::ZERO, n_samples); // XXX required for get_noinplace_buffers and  get_scratch_buffers
+		// NOT great, n_samples can be huge, many plugins require <= 8k
 		pi->run (bufs, start_sample, end_sample, 1.0, n_samples, true);
 #else
 		// XXX need bufs offset.
@@ -2287,6 +2301,6 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 #endif
 	}
 	_fx_pos = end_sample;
-	pt->drop_buffers ();
+	pt->drop_custom_buffers ();
 	delete pt;
 }

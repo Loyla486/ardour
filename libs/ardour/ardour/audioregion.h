@@ -63,6 +63,7 @@ class Session;
 class Filter;
 class AudioSource;
 class PluginInsert;
+class ThreadBuffers;
 
 class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 {
@@ -264,6 +265,7 @@ class LIBARDOUR_API AudioRegion : public Region, public AudioReadable
 	mutable samplepos_t          _cache_start;
 	mutable samplepos_t          _cache_end;
 	mutable std::atomic<bool>    _invalidated;
+	mutable ThreadBuffers*       _threadbuffer;
 
   protected:
 	/* default constructor for derived (compound) types */

@@ -73,6 +73,28 @@ ProcessThread::drop_buffers ()
 	_private_thread_buffers.set (0);
 }
 
+void
+ProcessThread::set_custom_buffers (ThreadBuffers* tb)
+{
+	assert (tb);
+	_private_thread_buffers.set (tb);
+}
+
+void
+ProcessThread::drop_custom_buffers ()
+{
+	_private_thread_buffers.set (0);
+}
+
+void
+ProcessThread::free_custom_buffers ()
+{
+	ThreadBuffers* tb = _private_thread_buffers.get();
+	assert (tb);
+	_private_thread_buffers.set (0);
+	delete tb;
+}
+
 BufferSet&
 ProcessThread::get_silent_buffers (ChanCount count)
 {
