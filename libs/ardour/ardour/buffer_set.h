@@ -69,6 +69,8 @@ public:
 	BufferSet();
 	~BufferSet();
 
+	BufferSet (BufferSet const&, samplecnt_t, sampleoffset_t);
+
 	void clear();
 
 	void attach_buffers (PortSet& ports);

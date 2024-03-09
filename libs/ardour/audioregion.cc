@@ -2263,12 +2263,11 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 		return;
 	}
 
-	//pframes_t block_size = _session.get_block_size ();
-
 	// XXX this processThread and ThreadBuffers should
 	// be owned by the butler.. or static?
 	// except the GUI thread may also call read_at...
 	ARDOUR::ProcessThread* pt = new ProcessThread ();
+#if 0
 	if (!_threadbuffer) {
 		_threadbuffer =  new ThreadBuffers;
 	}
@@ -2278,29 +2277,41 @@ AudioRegion::apply_region_fx (BufferSet& bufs, samplepos_t start_sample, samplep
 	}
 	_threadbuffer->ensure_buffers (cc, n_samples);
 	pt->set_custom_buffers (_threadbuffer);
+#else
+	pframes_t block_size = _session.get_block_size ();
+	// TODO bump  BufferManager::init by 1 buffer
+	pt->get_buffers ();
+#endif
 
 	for (auto const& pi : _plugins) {
 		if (_fx_pos != start_sample) {
 			pi->flush ();
 		}
-#if 1
+#if 0
 		// NOT great, n_samples can be huge, many plugins require <= 8k
 		pi->run (bufs, start_sample, end_sample, 1.0, n_samples, true);
 #else
-		// XXX need bufs offset.
-		// Also automation uses global session time for touch, and roll
+		// Note that automation uses global session time for touch, and roll
 		// we may need sth closed to IOPlug (except with replication)
+		//
+		// Consider a dedicated PluginInsert::run_with_offset_at_pos
+		// (and get rid of BufferSet w/offset)
 		samplecnt_t remain = n_samples;
 		samplecnt_t offset = 0;
 			while (remain > 0) {
 				pframes_t run = std::min <pframes_t> (remain, block_size);
-				pi->run (bufs, start_sample + offset, end_sample + offset, 1.0, run, true);
+				BufferSet bs (bufs, run, offset);
+				pi->run (bs, start_sample + offset, end_sample + offset, 1.0, run, true);
 				remain -= run;
 				offset += run;
 			}
 #endif
 	}
 	_fx_pos = end_sample;
+#if 0
 	pt->drop_custom_buffers ();
+#else
+	pt->drop_buffers ();
+#endif
 	delete pt;
 }

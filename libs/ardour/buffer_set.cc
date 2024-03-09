@@ -31,6 +31,7 @@
 #include "pbd/compose.h"
 #include "pbd/failed_constructor.h"
 
+#include "ardour/audio_buffer.h"
 #include "ardour/buffer.h"
 #include "ardour/buffer_set.h"
 #include "ardour/debug.h"
@@ -93,6 +94,26 @@ BufferSet::clear()
 	}
 	_lv2_buffers.clear ();
 
+}
+
+BufferSet::BufferSet (BufferSet const& o, samplecnt_t sz, sampleoffset_t off)
+	: _is_mirror(false)
+{
+	assert (DataType::num_types == 2);
+	for (size_t i=0; i < DataType::num_types; ++i) {
+		_buffers.push_back(BufferVec());
+	}
+	for (auto const& i : o._buffers[DataType::AUDIO]) {
+		AudioBuffer* a = new AudioBuffer (0);
+		a->set_data (dynamic_cast<AudioBuffer*>(i)->data (off), sz);
+		_buffers[DataType::AUDIO].push_back (a);
+	}
+	for (auto const& i : o._buffers[DataType::MIDI]) {
+		// TODO copy MIDI buffers (at offset).. and copy back in d'tor
+		_buffers[DataType::MIDI].push_back (Buffer::create (DataType::MIDI, dynamic_cast<MidiBuffer*>(i)->size ()));
+	}
+	_count = o._count;
+	_available = o._available;
 }
 
 /** Set up this BufferSet so that its data structures mirror a PortSet's buffers.
